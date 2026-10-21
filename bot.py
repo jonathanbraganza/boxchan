@@ -11,6 +11,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from colour_roles import ColourRolesView
 from config_store import ConfigStore, ConflictError, atomic_write_json
 from messages import MAX_MESSAGE_CHARS, MessageError, SendLimiter, parse_mentions
 import engines
@@ -177,6 +178,7 @@ class GuildAudio:
 
 class TTSBot(commands.Bot):
     async def setup_hook(self):
+        self.add_view(ColourRolesView())
         try:
             await self.tree.sync()
         except Exception:
@@ -307,6 +309,8 @@ async def only_tts_channel(ctx: commands.Context) -> bool:
     """Commands work only in the configured text channel, unless caller has 'Big bots' role."""
     if not ctx.guild:
         raise commands.CheckFailure("wrong channel")
+    if ctx.command and ctx.command.name in ("colourpanel", "colorpanel"):
+        return True
     if has_big_bots_role(ctx.author):
         return True
     if not config.is_command_channel(ctx.guild.id, ctx.channel.id):
@@ -689,6 +693,44 @@ async def help_cmd(ctx: commands.Context):
 
     await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
 
+
+def can_post_colourpanel(ctx: commands.Context) -> bool:
+    if not ctx.guild or not isinstance(ctx.author, discord.Member):
+        return False
+    if has_big_bots_role(ctx.author):
+        return True
+    perms = ctx.author.guild_permissions
+    return perms.manage_roles or perms.administrator
+
+
+@bot.hybrid_command(name="colourpanel", description="Post the colour-role selection menu (Admin only)")
+@commands.guild_only()
+@discord.app_commands.default_permissions(manage_roles=True)
+@commands.check(can_post_colourpanel)
+async def colourpanel(ctx: commands.Context):
+    """Post an interactive embed panel allowing members to select their name colour."""
+    embed = discord.Embed(
+        title="🎨 Choose Your Name Colour",
+        description=(
+            "Select a colour from the dropdown menu below to change your name colour in this server.\n\n"
+            "To remove your colour role, choose **Remove Colour**."
+        ),
+        color=0x4F46E5,
+    )
+    view = ColourRolesView()
+    await ctx.send(embed=embed, view=view)
+
+
+@colourpanel.error
+async def colourpanel_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, (commands.CheckFailure, commands.MissingPermissions)):
+        message = "You need the **Manage Roles** permission to post the colour panel."
+        if ctx.interaction:
+            await ctx.send(message, ephemeral=True)
+        else:
+            await ctx.send(message)
+        return
+    log.error("colourpanel command error: %r", error)
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
