@@ -72,7 +72,12 @@ async def apply_member_colour(
     current_colour_roles = get_member_colour_roles(member)
 
     # --- Scenario A: User wants to remove their colour ---
-    if chosen_colour is None or chosen_colour == "none":
+    if chosen_colour is None:
+        pass
+    elif isinstance(chosen_colour, str) and chosen_colour.casefold() == "none":
+        chosen_colour = None
+
+    if chosen_colour is None:
         if not current_colour_roles:
             return True, "You do not currently have a colour role assigned."
 

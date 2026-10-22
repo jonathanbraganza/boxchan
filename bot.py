@@ -703,9 +703,8 @@ def can_post_colourpanel(ctx: commands.Context) -> bool:
     return perms.manage_roles or perms.administrator
 
 
-@bot.hybrid_command(name="colourpanel", description="Post the colour-role selection menu (Admin only)")
+@bot.hybrid_command(name="colourpanel", description="Post the colour-role selection menu")
 @commands.guild_only()
-@discord.app_commands.default_permissions(manage_roles=True)
 @commands.check(can_post_colourpanel)
 async def colourpanel(ctx: commands.Context):
     """Post an interactive embed panel allowing members to select their name colour."""
@@ -724,7 +723,10 @@ async def colourpanel(ctx: commands.Context):
 @colourpanel.error
 async def colourpanel_error(ctx: commands.Context, error: commands.CommandError):
     if isinstance(error, (commands.CheckFailure, commands.MissingPermissions)):
-        message = "You need the **Manage Roles** permission to post the colour panel."
+        message = (
+            "You need the **Big bots** role, **Manage Roles**, or **Administrator** permission "
+            "to post the colour panel."
+        )
         if ctx.interaction:
             await ctx.send(message, ephemeral=True)
         else:
