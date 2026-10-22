@@ -10,16 +10,16 @@ log = logging.getLogger("colour_roles")
 
 # Exact role names, hex colours, and display emojis
 COLOUR_ROLES: dict[str, dict[str, str]] = {
-    "Crimson": {"hex": "#FF3333", "emoji": "🔴"},
-    "Tangerine": {"hex": "#FF8C00", "emoji": "🟠"},
-    "Sunburst": {"hex": "#FFD700", "emoji": "🟡"},
-    "Clover": {"hex": "#20C45A", "emoji": "🟢"},
-    "Sapphire": {"hex": "#1685FF", "emoji": "🔵"},
-    "Amethyst": {"hex": "#8B35D1", "emoji": "🟣"},
-    "Bubblegum": {"hex": "#FF4FA3", "emoji": "🌸"},
-    "Graphite": {"hex": "#7A7A7A", "emoji": "🪙"},
-    "Pearl": {"hex": "#FFFFFF", "emoji": "⚪"},
-    "Onyx": {"hex": "#222222", "emoji": "⚫"},
+    "Sharingan Red": {"hex": "#FF3333", "emoji": "🔴"},
+    "Naruto Orange": {"hex": "#FF8C00", "emoji": "🟠"},
+    "Thunder Breathing": {"hex": "#FFD700", "emoji": "🟡"},
+    "Deku Green": {"hex": "#20C45A", "emoji": "🟢"},
+    "Limitless Blue": {"hex": "#1685FF", "emoji": "🔵"},
+    "Hollow Purple": {"hex": "#8B35D1", "emoji": "🟣"},
+    "Sakura Blossom": {"hex": "#FF4FA3", "emoji": "🌸"},
+    "Titan Ash": {"hex": "#7A7A7A", "emoji": "🪙"},
+    "Hashira White": {"hex": "#FFFFFF", "emoji": "⚪"},
+    "Akatsuki Black": {"hex": "#222222", "emoji": "⚫"},
 }
 
 MANAGED_COLOUR_NAMES: frozenset[str] = frozenset(COLOUR_ROLES.keys())
