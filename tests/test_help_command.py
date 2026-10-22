@@ -89,7 +89,7 @@ class HelpCommandTest(CommandTestBase):
     async def test_help_lists_all_registered_commands(self):
         ctx, text = await self.run_help()
         self.assertEqual({c.name for c in bot.bot.commands},
-                         {"help", "join", "leave", "skip", "status", "stop", "voices", "watch"})
+                         {"colourpanel", "help", "join", "leave", "skip", "status", "stop", "voices", "watch"})
         for cmd in bot.bot.commands:
             self.assertIn(f"`{bot.PREFIX}{cmd.name}`", text)
             self.assertIn(cmd.description, text)
