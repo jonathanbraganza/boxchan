@@ -4,6 +4,7 @@ import gc
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import time
 import wave
@@ -337,21 +338,8 @@ class TTSEngine:
             self._resume_blocking()
         st = voice_state or self._state
         if st.engine != "piper":
-            mod = engines.get(st.engine)
-            speed = 1.0 / length_scale if length_scale > 0 else 1.0
-            try:
-                return mod.synth(st.voice, text, speed=speed)
-            except TypeError:
-                return mod.synth(st.voice, text)
-        if length_scale == 1.0:
-            try:
-                return self._synth_with(st.voice, text)
-            except TypeError:
-                pass
-        try:
-            return self._synth_with(st.voice, text, length_scale=length_scale)
-        except TypeError:
-            return self._synth_with(st.voice, text)
+            return engines.get(st.engine).synth(st.voice, text)
+        return self._synth_with(st.voice, text)
 
     def _reload_engine_blocking(self, engine_name: str, models_dir: str, name: str) -> None:
         """Worker thread. Build + warm up a non-Piper candidate; swap only on success."""
@@ -449,9 +437,7 @@ class TTSEngine:
     def _synth_to_wav(self, text: str, speed: float = 1.0, voice_name: str | None = None) -> str | None:
         try:
             target_st, _ = self._get_voice_for_synth(voice_name)
-            clamped_speed = max(0.5, min(2.0, float(speed))) if speed else 1.0
-            length_scale = 1.0 / clamped_speed
-            pcm = self._synth(text, length_scale=length_scale, voice_state=target_st)
+            pcm = self._synth(text, voice_state=target_st)
             if not pcm:
                 return None
             with tempfile.NamedTemporaryFile(dir=self.tmp_dir, suffix=".wav", delete=False) as tf:
@@ -461,6 +447,26 @@ class TTSEngine:
                 w.setsampwidth(2)
                 w.setframerate(target_st.sample_rate)
                 w.writeframes(pcm)
+
+            clamped_speed = max(0.5, min(2.0, float(speed))) if speed else 1.0
+            if abs(clamped_speed - 1.0) >= 0.01:
+                out_path = path + ".speed.wav"
+                try:
+                    proc = subprocess.run(
+                        ["ffmpeg", "-y", "-i", path, "-filter:a", f"atempo={clamped_speed:.2f}", out_path, "-loglevel", "error"],
+                        capture_output=True,
+                    )
+                    if proc.returncode == 0 and os.path.exists(out_path):
+                        os.replace(out_path, path)
+                    elif os.path.exists(out_path):
+                        os.remove(out_path)
+                except Exception:
+                    log.exception("ffmpeg speed adjustment failed; using original audio")
+                    if os.path.exists(out_path):
+                        try:
+                            os.remove(out_path)
+                        except OSError:
+                            pass
             return path
         except Exception:
             log.exception("synthesis failed")
