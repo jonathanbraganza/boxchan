@@ -106,9 +106,11 @@ def clean_plain_text(text: str, max_chars: int = 300) -> str | None:
 class TTSEngine:
     """Single GPU context: one worker thread + asyncio.Lock serialize all inference."""
 
-    def __init__(self, model_path: str, config_path: str | None = None):
-        self._state = VoiceState(voice=None, sample_rate=22050, model_path=Path(model_path),
-                                config_path=Path(config_path) if config_path else Path(str(model_path) + ".json"),
+    def __init__(self, model_path: str = "/models/default.onnx", config_path: str | None = None):
+        mp = Path(model_path) if model_path else Path("/models/default.onnx")
+        cp = Path(config_path) if config_path else Path(str(mp) + ".json")
+        self._state = VoiceState(voice=None, sample_rate=22050, model_path=mp,
+                                config_path=cp,
                                 cuda_active=False)
         self.ready = False
         self._pending_reloads = 0
@@ -283,7 +285,7 @@ class TTSEngine:
                     del evict_v
                     gc.collect()
                 self._voice_cache[voice_name] = cached
-                return cached, True
+                return cached, False
             except Exception:
                 log.exception("Failed to load secondary voice %s; using active voice", voice_name)
                 return self._state, False
@@ -297,7 +299,13 @@ class TTSEngine:
                     cached = VoiceState(voice=k_handle, sample_rate=24000, model_path=st.model_path,
                                         config_path=st.config_path, cuda_active=st.cuda_active,
                                         engine="kokoro", name=voice_name)
-                    return cached, True
+                    if len(self._voice_cache) >= self.MAX_CACHED_VOICES:
+                        evict_k, evict_v = next(iter(self._voice_cache.items()))
+                        del self._voice_cache[evict_k]
+                        del evict_v
+                        gc.collect()
+                    self._voice_cache[voice_name] = cached
+                    return cached, False
                 except Exception:
                     log.warning("Kokoro voice %s invalid; using active voice", voice_name)
                     return self._state, False

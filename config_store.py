@@ -171,14 +171,14 @@ class ConfigStore:
         return await self._apply(guild_id, "enabled", bool(enabled), expected_rev, editor)
 
     async def set_speed(self, guild_id: int, speed: float, *,
-                        expected_rev: int | None, editor: str) -> dict:
+                        expected_rev: int | None = None, editor: str = "api") -> dict:
         speed_val = round(float(speed), 2)
         if not (0.5 <= speed_val <= 2.0):
             raise ValueError("speed must be between 0.5 and 2.0")
         return await self._apply(guild_id, "speed", speed_val, expected_rev, editor)
 
     async def set_volume(self, guild_id: int, volume: float, *,
-                         expected_rev: int | None, editor: str) -> dict:
+                         expected_rev: int | None = None, editor: str = "api") -> dict:
         vol_val = round(float(volume), 2)
         if not (0.1 <= vol_val <= 2.0):
             raise ValueError("volume must be between 0.1 and 2.0")
@@ -241,8 +241,9 @@ class ConfigStore:
         """Apply, persist, publish. Caller holds the lock."""
         key = str(guild_id)
         had = key in self._guilds
+        default_val = None if field == "channel_id" else (True if field == "enabled" else 1.0)
         entry = self._guilds.get(key) or {"channel_id": None, "enabled": True}
-        old = entry.get(field)
+        old = entry.get(field, default_val)
         prev = (self.rev, self.updated_by, self.updated_at, dict(self._guilds.get(key) or {}))
         self._guilds[key] = {**entry, field: value}
         self.rev += 1

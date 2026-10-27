@@ -165,6 +165,7 @@ class WatchStore:
                     self.user_voices.setdefault(guild_id, {})[user_id] = voice
             elif op == "set_voice":
                 if user_id:
+                    users.add(user_id)
                     if voice:
                         self.user_voices.setdefault(guild_id, {})[user_id] = voice
                     else:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
@@ -289,7 +290,7 @@ class BotCommandsAudioTests(unittest.IsolatedAsyncioTestCase):
 
 class TTSEngineVoiceCacheTests(unittest.TestCase):
     def test_secondary_voice_cache(self):
-        eng = TTSEngine()
+        eng = TTSEngine("/tmp/primary.onnx")
         self.addCleanup(eng.close)
 
         fake_voice1 = mock.MagicMock()
@@ -297,11 +298,14 @@ class TTSEngineVoiceCacheTests(unittest.TestCase):
         fake_voice2 = mock.MagicMock()
         fake_voice2.synthesize_stream_raw.return_value = [b"\x00\x00" * 100]
 
-        eng._state = VoiceState(voice=fake_voice1, config={"sample_rate": 22050}, name="primary")
+        eng._state = VoiceState(voice=fake_voice1, sample_rate=22050,
+                                model_path=Path("/tmp/primary.onnx"),
+                                config_path=Path("/tmp/primary.onnx.json"),
+                                cuda_active=False, engine="piper", name="primary")
 
         # Mock loading secondary voice
-        with mock.patch("tts_engine.resolve_voice", return_value=("/tmp/v2.onnx", "/tmp/v2.json")), \
-             mock.patch.object(eng, "_load_piper_voice", return_value=(fake_voice2, {"sample_rate": 22050})):
+        with mock.patch("pathlib.Path.is_file", return_value=True), \
+             mock.patch.object(eng, "_build", return_value=(fake_voice2, False)):
             state, from_cache = eng._get_voice_for_synth("secondary")
             self.assertEqual(state.name, "secondary")
             self.assertFalse(from_cache)
