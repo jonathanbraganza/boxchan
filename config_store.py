@@ -83,10 +83,21 @@ class ConfigStore:
             guilds = {}
             for gid, entry in data.get("guilds", {}).items():
                 ch = entry.get("channel_id")
-                guilds[str(gid)] = {
+                g_dict = {
                     "channel_id": int(ch) if ch is not None else None,
                     "enabled": bool(entry.get("enabled", True)),
                 }
+                if "speed" in entry:
+                    try:
+                        g_dict["speed"] = float(entry["speed"])
+                    except (ValueError, TypeError):
+                        pass
+                if "volume" in entry:
+                    try:
+                        g_dict["volume"] = float(entry["volume"])
+                    except (ValueError, TypeError):
+                        pass
+                guilds[str(gid)] = g_dict
             self.rev = int(data.get("rev", 0))
             self.updated_by = data.get("updated_by")
             self.updated_at = data.get("updated_at")
@@ -139,6 +150,18 @@ class ConfigStore:
         entry = self._guilds.get(str(guild_id))
         return bool(entry) and entry["channel_id"] == channel_id
 
+    def speed_for(self, guild_id: int) -> float:
+        entry = self._guilds.get(str(guild_id))
+        if entry and "speed" in entry:
+            return float(entry["speed"])
+        return 1.0
+
+    def volume_for(self, guild_id: int) -> float:
+        entry = self._guilds.get(str(guild_id))
+        if entry and "volume" in entry:
+            return float(entry["volume"])
+        return 1.0
+
     async def set_channel(self, guild_id: int, channel_id: int | None, *,
                           expected_rev: int | None, editor: str) -> dict:
         return await self._apply(guild_id, "channel_id", channel_id, expected_rev, editor)
@@ -146,6 +169,20 @@ class ConfigStore:
     async def set_enabled(self, guild_id: int, enabled: bool, *,
                           expected_rev: int | None, editor: str) -> dict:
         return await self._apply(guild_id, "enabled", bool(enabled), expected_rev, editor)
+
+    async def set_speed(self, guild_id: int, speed: float, *,
+                        expected_rev: int | None, editor: str) -> dict:
+        speed_val = round(float(speed), 2)
+        if not (0.5 <= speed_val <= 2.0):
+            raise ValueError("speed must be between 0.5 and 2.0")
+        return await self._apply(guild_id, "speed", speed_val, expected_rev, editor)
+
+    async def set_volume(self, guild_id: int, volume: float, *,
+                         expected_rev: int | None, editor: str) -> dict:
+        vol_val = round(float(volume), 2)
+        if not (0.1 <= vol_val <= 2.0):
+            raise ValueError("volume must be between 0.1 and 2.0")
+        return await self._apply(guild_id, "volume", vol_val, expected_rev, editor)
 
     async def set_voice(self, name: str | None, *, expected_rev: int | None, editor: str,
                         engine: str | None = None) -> dict:
@@ -194,8 +231,9 @@ class ConfigStore:
             if expected_rev is not None and expected_rev != self.rev:
                 raise ConflictError(self.snapshot())
             entry = self._guilds.get(str(guild_id))
-            current = entry[field] if entry else (None if field == "channel_id" else True)
-            if entry is not None and current == value:
+            default_val = None if field == "channel_id" else (True if field == "enabled" else 1.0)
+            current = entry.get(field, default_val) if entry else default_val
+            if entry is not None and field in entry and current == value:
                 return self.snapshot()
             return await self._mutate(guild_id, field, value, editor)
 
@@ -204,7 +242,7 @@ class ConfigStore:
         key = str(guild_id)
         had = key in self._guilds
         entry = self._guilds.get(key) or {"channel_id": None, "enabled": True}
-        old = entry[field]
+        old = entry.get(field)
         prev = (self.rev, self.updated_by, self.updated_at, dict(self._guilds.get(key) or {}))
         self._guilds[key] = {**entry, field: value}
         self.rev += 1

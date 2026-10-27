@@ -1,0 +1,3 @@
+[submodule "boxchan"]
+	path = boxchan
+	url = https://github.com/AwaizSK/boxchan

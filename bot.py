@@ -112,12 +112,15 @@ class WatchStore:
         self.path = path
         self.data: dict[int, set[int]] = {}
         self.voice_channels: dict[int, int] = {}
+        self.user_voices: dict[int, dict[int, str]] = {}
         self.lock = asyncio.Lock()
         try:
             with open(path) as f:
                 raw = json.load(f)
             self.data = {int(g): {int(u) for u in us} for g, us in raw.get("watched", {}).items()}
             self.voice_channels = {int(g): int(vc) for g, vc in raw.get("voice_channels", {}).items() if vc}
+            self.user_voices = {int(g): {int(u): str(v) for u, v in uvs.items()}
+                                for g, uvs in raw.get("user_voices", {}).items() if isinstance(uvs, dict)}
         except FileNotFoundError:
             pass
         except Exception:
@@ -129,10 +132,16 @@ class WatchStore:
     def get_voice_channel(self, guild_id: int) -> int | None:
         return self.voice_channels.get(guild_id)
 
+    def get_user_voice(self, guild_id: int, user_id: int) -> str | None:
+        return self.user_voices.get(guild_id, {}).get(user_id)
+
     def snapshot(self) -> dict:
         snap = {"watched": {str(g): sorted(u) for g, u in self.data.items() if u}}
         if self.voice_channels:
             snap["voice_channels"] = {str(g): vc for g, vc in self.voice_channels.items() if vc}
+        if self.user_voices:
+            snap["user_voices"] = {str(g): {str(u): v for u, v in uvs.items() if v}
+                                   for g, uvs in self.user_voices.items() if uvs}
         return snap
 
     async def set_voice_channel(self, guild_id: int, channel_id: int | None) -> None:
@@ -147,15 +156,25 @@ class WatchStore:
             except Exception:
                 log.exception("state save failed")
 
-    async def mutate(self, guild_id: int, op: str, user_id: int | None = None) -> None:
+    async def mutate(self, guild_id: int, op: str, user_id: int | None = None, voice: str | None = None) -> None:
         async with self.lock:
             users = self.data.setdefault(guild_id, set())
             if op == "add":
                 users.add(user_id)
+                if voice:
+                    self.user_voices.setdefault(guild_id, {})[user_id] = voice
+            elif op == "set_voice":
+                if user_id:
+                    if voice:
+                        self.user_voices.setdefault(guild_id, {})[user_id] = voice
+                    else:
+                        self.user_voices.get(guild_id, {}).pop(user_id, None)
             elif op == "remove":
                 users.discard(user_id)
+                self.user_voices.get(guild_id, {}).pop(user_id, None)
             elif op == "clear":
                 users.clear()
+                self.user_voices.pop(guild_id, None)
             snap = self.snapshot()
             try:
                 await asyncio.to_thread(atomic_write_json, snap, self.path)
@@ -237,13 +256,20 @@ async def audio_worker(ga: GuildAudio) -> None:
     """One per guild. Survives errors/reconnects; only cancellation ends it."""
     loop = asyncio.get_running_loop()
     while True:
-        text = await ga.queue.get()
+        raw_item = await ga.queue.get()
+        user_voice = None
+        if isinstance(raw_item, tuple):
+            text, user_voice = raw_item
+        else:
+            text = raw_item
         path = None
         try:
             guild = bot.get_guild(ga.guild_id)
             if guild is None or await wait_connected(guild) is None:
                 continue
-            path = await engine.synthesize(text)  # off-loop, GPU-serialized
+            speed = config.speed_for(ga.guild_id)
+            volume = config.volume_for(ga.guild_id)
+            path = await engine.synthesize(text, speed=speed, voice_name=user_voice)  # off-loop, GPU-serialized
             if not path:
                 continue
             vc = await wait_connected(guild)
@@ -258,7 +284,11 @@ async def audio_worker(ga: GuildAudio) -> None:
                 loop.call_soon_threadsafe(ga.play_done.set)
 
             try:
-                vc.play(discord.FFmpegPCMAudio(path, options="-loglevel error"), after=after)
+                audio_source = discord.PCMVolumeTransformer(
+                    discord.FFmpegPCMAudio(path, options="-loglevel error"),
+                    volume=volume
+                )
+                vc.play(audio_source, after=after)
             except Exception:
                 log.exception("vc.play failed")
                 continue  # path cleaned in finally
@@ -403,8 +433,10 @@ async def on_message(message: discord.Message):
     text = clean_discord_text(message, MAX_CHARS)
     if not text:  # empty-result guard: never reaches queue/GPU
         return
+    user_voice = store.get_user_voice(message.guild.id, message.author.id)
+    item = (text, user_voice) if user_voice else text
     try:
-        ga.queue.put_nowait(text)
+        ga.queue.put_nowait(item)
     except asyncio.QueueFull:
         log.warning("queue full (guild %s); dropped message %s", message.guild.id, message.id)
         try:
@@ -491,12 +523,23 @@ async def leave(ctx: commands.Context):
     await ctx.send("Left. Queue cleared, watch list flushed." if had_vc else "Not in voice. Watch list flushed.")
 
 
-@bot.hybrid_command(name="watch", description="Read this user's messages aloud, optionally join voice")
+@bot.hybrid_command(name="watch", description="Read this user's messages aloud, optionally with a custom voice")
 @commands.guild_only()
-async def watch(ctx: commands.Context, member: discord.Member):
-    # Always add to watch list first
-    await store.mutate(ctx.guild.id, "add", member.id)
-    reply = f"Watching **{member.display_name}**."
+async def watch(ctx: commands.Context, member: discord.Member, voice: str | None = None):
+    # If a custom voice is specified, validate it
+    if voice:
+        try:
+            active_eng = controller._active_engine()
+            if engines.valid_engine(active_eng) and active_eng != "piper":
+                engines.get(active_eng).resolve(MODELS_DIR, voice)
+            else:
+                resolve_voice(MODELS_DIR, voice)
+        except Exception:
+            await ctx.send(f"Unknown voice **{voice}**. Use `{PREFIX}voices` to see available voices.",
+                           allowed_mentions=discord.AllowedMentions.none())
+            return
+    await store.mutate(ctx.guild.id, "add", member.id, voice=voice)
+    reply = f"Watching **{member.display_name}**" + (f" with voice **{voice}**." if voice else ".")
 
     # Try to auto-join if not connected and author in voice
     if not voice_connected(ctx.voice_client):
@@ -506,9 +549,73 @@ async def watch(ctx: commands.Context, member: discord.Member):
         else:
             # Author not in a voice channel
             reply += f" Run `{PREFIX}join` from a voice channel to start reading."
-    # else: already connected, don't try to join
 
     await ctx.send(reply, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.hybrid_command(name="setvoice", description="Set or reset a custom voice for a watched user")
+@commands.guild_only()
+async def setvoice(ctx: commands.Context, member: discord.Member, voice: str | None = None):
+    if not store.is_watched(ctx.guild.id, member.id):
+        await ctx.send(f"**{member.display_name}** is not in the watch list. Use `{PREFIX}watch` first.",
+                       allowed_mentions=discord.AllowedMentions.none())
+        return
+    if voice:
+        try:
+            active_eng = controller._active_engine()
+            if engines.valid_engine(active_eng) and active_eng != "piper":
+                engines.get(active_eng).resolve(MODELS_DIR, voice)
+            else:
+                resolve_voice(MODELS_DIR, voice)
+        except Exception:
+            await ctx.send(f"Unknown voice **{voice}**. Use `{PREFIX}voices` to see available voices.",
+                           allowed_mentions=discord.AllowedMentions.none())
+            return
+        await store.mutate(ctx.guild.id, "set_voice", member.id, voice=voice)
+        await ctx.send(f"Set voice for **{member.display_name}** to **{voice}**.",
+                       allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await store.mutate(ctx.guild.id, "set_voice", member.id, voice=None)
+        await ctx.send(f"Reset voice for **{member.display_name}** to default.",
+                       allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.hybrid_command(name="speed", description="Show or set TTS speech speed (0.5x to 2.0x)")
+@commands.guild_only()
+async def speed_cmd(ctx: commands.Context, speed: float | None = None):
+    if speed is None:
+        cur = config.speed_for(ctx.guild.id)
+        await ctx.send(f"Current speech speed is **{cur:.2f}x**.", allowed_mentions=discord.AllowedMentions.none())
+        return
+    if not (0.5 <= speed <= 2.0):
+        await ctx.send("Speed must be between 0.5 and 2.0.", allowed_mentions=discord.AllowedMentions.none())
+        return
+    editor = ctx.author.display_name if hasattr(ctx.author, "display_name") else "cmd"
+    await config.set_speed(ctx.guild.id, speed, expected_rev=None, editor=editor)
+    await ctx.send(f"Speech speed set to **{speed:.2f}x**.", allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.hybrid_command(name="volume", description="Show or set playback volume (10% to 200%)")
+@commands.guild_only()
+async def volume_cmd(ctx: commands.Context, volume: str | None = None):
+    if volume is None:
+        cur = config.volume_for(ctx.guild.id)
+        await ctx.send(f"Current volume is **{int(round(cur * 100))}%**.", allowed_mentions=discord.AllowedMentions.none())
+        return
+    val_str = volume.strip().rstrip("%")
+    try:
+        val = float(val_str)
+        if "%" in volume or val > 2.0:
+            val = val / 100.0
+    except ValueError:
+        await ctx.send("Invalid volume. Provide a number (e.g. 1.0 or 100%).", allowed_mentions=discord.AllowedMentions.none())
+        return
+    if not (0.1 <= val <= 2.0):
+        await ctx.send("Volume must be between 10% (0.1) and 200% (2.0).", allowed_mentions=discord.AllowedMentions.none())
+        return
+    editor = ctx.author.display_name if hasattr(ctx.author, "display_name") else "cmd"
+    await config.set_volume(ctx.guild.id, val, expected_rev=None, editor=editor)
+    await ctx.send(f"Volume set to **{int(round(val * 100))}%**.", allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.hybrid_command(name="stop", description="Stop reading this user's messages")
@@ -535,14 +642,21 @@ async def status(ctx: commands.Context):
     names = []
     for uid in sorted(store.data.get(ctx.guild.id, ())):
         m = ctx.guild.get_member(uid)
-        names.append(m.display_name if m else str(uid))
+        u_name = m.display_name if m else str(uid)
+        u_voice = store.get_user_voice(ctx.guild.id, uid)
+        if u_voice:
+            names.append(f"{u_name} ({u_voice})")
+        else:
+            names.append(u_name)
     vc = ctx.voice_client
     voice = f"connected to **{vc.channel.name}**" if voice_connected(vc) else "not connected"
     ga = audio.get(ctx.guild.id)
+    spd = config.speed_for(ctx.guild.id)
+    vol = int(round(config.volume_for(ctx.guild.id) * 100))
     await ctx.send(
         f"Voice: {voice}\nWatched: {', '.join(names) or 'none'}\n"
-        f"Queue: {ga.queue.qsize() if ga else 0}/{MAX_QUEUE} | TTS: {'ready' if engine.ready else 'unavailable'}"
-        f" | CUDA: {'yes' if engine.cuda_active else 'no'}"
+        f"Queue: {ga.queue.qsize() if ga else 0}/{MAX_QUEUE} | Speed: {spd:.2f}x | Volume: {vol}%\n"
+        f"TTS: {'ready' if engine.ready else 'unavailable'} | CUDA: {'yes' if engine.cuda_active else 'no'}"
     )
 
 
@@ -889,7 +1003,7 @@ class Controller:
                         self._publish_voice(False, err)
                 raise
 
-    def say(self, guild_id: int, text: str, editor: str = "") -> dict:
+    def say(self, guild_id: int, text: str, editor: str = "", voice: str | None = None) -> dict:
         """Queue a test phrase on this guild's normal audio path. Raises SayError."""
         cleaned = clean_plain_text(text, SAY_MAX_CHARS)
         if not cleaned:
@@ -901,12 +1015,35 @@ class Controller:
             raise SayError("not_connected")
         if not engine.ready:
             raise SayError("tts_unavailable")
+        item = (cleaned, voice) if voice else cleaned
         try:
-            ga.queue.put_nowait(cleaned)
+            ga.queue.put_nowait(item)
         except asyncio.QueueFull:
             raise SayError("queue_full") from None
         log.info("gui test phrase queued guild=%s editor=%s chars=%d", guild_id, editor, len(cleaned))
         return {"queued": True}
+
+    def watched_users(self, guild_id: int) -> list[dict]:
+        guild = bot.get_guild(guild_id)
+        uids = sorted(store.data.get(guild_id, ()))
+        out = []
+        for uid in uids:
+            m = guild.get_member(uid) if guild else None
+            out.append({
+                "id": str(uid),
+                "name": m.display_name if m else str(uid),
+                "voice": store.get_user_voice(guild_id, uid),
+            })
+        return out
+
+    async def set_user_voice(self, guild_id: int, user_id: int, voice: str | None) -> None:
+        if voice:
+            active_eng = self._active_engine()
+            if engines.valid_engine(active_eng) and active_eng != "piper":
+                await asyncio.to_thread(engines.get(active_eng).resolve, MODELS_DIR, voice)
+            else:
+                await asyncio.to_thread(resolve_voice, MODELS_DIR, voice)
+        await store.mutate(guild_id, "set_voice", user_id, voice=voice)
 
     # --- messages (Messages tab) ---
     def _message_channel(self, guild_id: int, channel_id: int | None = None):

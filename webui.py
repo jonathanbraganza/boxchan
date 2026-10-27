@@ -653,7 +653,9 @@ def _s(v):
 
 def wire_snapshot(snap: dict) -> dict:
     """Snapshot with channel ids as strings (JS-safe)."""
-    return {**snap, "guilds": {g: {**e, "channel_id": _s(e.get("channel_id"))}
+    return {**snap, "guilds": {g: {**e, "channel_id": _s(e.get("channel_id")),
+                                   "speed": e.get("speed", 1.0),
+                                   "volume": e.get("volume", 1.0)}
                                for g, e in snap["guilds"].items()}}
 
 
@@ -929,11 +931,23 @@ def make_app(config, controller, *, allowed_hosts, status_interval: float = 3.0,
             return _err("bad_request", 400)
         if len(text) > MAX_SAY_CHARS:
             return _err("too_long", 400)
+        voice = body.get("voice")
+        if voice is not None:
+            if not isinstance(voice, str):
+                return _err("bad_request", 400)
+            voice = voice.strip()
+            if not voice:
+                voice = None
+            elif VOICE_NAME_RE.fullmatch(voice) is None:
+                return _err("bad_voice", 400)
         try:
             try:
-                return _json(controller.say(gid, text, editor=editor))
+                return _json(controller.say(gid, text, editor=editor, voice=voice))
             except TypeError:
-                return _json(controller.say(gid, text))
+                try:
+                    return _json(controller.say(gid, text, editor=editor))
+                except TypeError:
+                    return _json(controller.say(gid, text))
         except SayError as e:
             if e.code == "bad_text":
                 return _err("bad_request", 400)
@@ -1039,6 +1053,66 @@ def make_app(config, controller, *, allowed_hosts, status_interval: float = 3.0,
         if not isinstance(enabled, bool):
             return _err("bad_request", 400)
         return await write(config.set_enabled(gid, enabled, expected_rev=body.get("rev"), editor=editor))
+
+    async def put_speed(request):
+        gid = known_guild(request)
+        editor = editor_of(request)
+        body = await body_of(request)
+        speed = body.get("speed")
+        if not isinstance(speed, (int, float)) or isinstance(speed, bool):
+            return _err("bad_request", 400)
+        speed_val = float(speed)
+        if not (0.5 <= speed_val <= 2.0):
+            return _err("bad_request", 400)
+        return await write(config.set_speed(gid, speed_val, expected_rev=body.get("rev"), editor=editor))
+
+    async def put_volume(request):
+        gid = known_guild(request)
+        editor = editor_of(request)
+        body = await body_of(request)
+        volume = body.get("volume")
+        if not isinstance(volume, (int, float)) or isinstance(volume, bool):
+            return _err("bad_request", 400)
+        vol_val = float(volume)
+        if not (0.1 <= vol_val <= 2.0):
+            return _err("bad_request", 400)
+        return await write(config.set_volume(gid, vol_val, expected_rev=body.get("rev"), editor=editor))
+
+    async def get_watched_users(request):
+        gid = known_guild(request)
+        fn = getattr(controller, "watched_users", None)
+        users = fn(gid) if fn else []
+        return _json({"users": users})
+
+    async def put_user_voice(request):
+        gid = known_guild(request)
+        uid_str = request.match_info.get("uid", "")
+        if not (uid_str.isascii() and uid_str.isdigit()):
+            return _err("bad_request", 400)
+        uid = int(uid_str)
+        body = await body_of(request)
+        voice = body.get("voice")
+        if voice is not None:
+            if not isinstance(voice, str):
+                return _err("bad_request", 400)
+            voice = voice.strip()
+            if not voice:
+                voice = None
+            elif VOICE_NAME_RE.fullmatch(voice) is None:
+                return _err("bad_voice", 400)
+        fn = getattr(controller, "set_user_voice", None)
+        if not fn:
+            return _err("internal", 500)
+        try:
+            res = fn(gid, uid, voice)
+            if asyncio.iscoroutine(res):
+                await res
+        except BadVoiceError:
+            return _err("bad_voice", 400)
+        except Exception:
+            log.exception("setting user voice failed")
+            return _err("internal", 500)
+        return _json({"ok": True, "guild_id": str(gid), "user_id": str(uid), "voice": voice})
 
     async def skip(request):
         gid = known_guild(request)
@@ -1278,6 +1352,10 @@ def make_app(config, controller, *, allowed_hosts, status_interval: float = 3.0,
     app.router.add_get("/api/state", state)
     app.router.add_put("/api/guilds/{gid}/channel", put_channel)
     app.router.add_put("/api/guilds/{gid}/enabled", put_enabled)
+    app.router.add_put("/api/guilds/{gid}/speed", put_speed)
+    app.router.add_put("/api/guilds/{gid}/volume", put_volume)
+    app.router.add_get("/api/guilds/{gid}/watched", get_watched_users)
+    app.router.add_put("/api/guilds/{gid}/watched/{uid}/voice", put_user_voice)
     app.router.add_post("/api/guilds/{gid}/skip", skip)
     app.router.add_post("/api/guilds/{gid}/clear", clear)
     app.router.add_get("/api/voices", list_voices)

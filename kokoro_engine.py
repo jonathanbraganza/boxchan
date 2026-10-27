@@ -102,8 +102,8 @@ def build(models_dir, name, providers_hint=None):
     raise VoiceLoadError() from last
 
 
-def synth(handle: Handle, text: str) -> bytes:
+def synth(handle: Handle, text: str, speed: float = 1.0) -> bytes:
     import numpy as np
-    samples, _sr = handle.kokoro.create(text, voice=handle.voice, speed=1.0, lang=handle.lang)
+    samples, _sr = handle.kokoro.create(text, voice=handle.voice, speed=float(speed), lang=handle.lang)
     pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
     return pcm.tobytes()
